@@ -81,16 +81,15 @@ The current dataset (`data/services.csv`) contains **~100 entries** of Philadelp
 ---
 
 ## 🧪 Prototype (Screenshots)
-_These are placeholders — replace with actual screenshots once the Streamlit UI runs._
 
-- **Search Interface**  
-  ![Search](docs/screens/01_search.png)  
+**Search Interface**  
+![Search](../images/search.png)
 
-- **Generated Service Cards**  
-  ![Results](docs/screens/02_cards.png)  
+**Generated Service Cards**  
+![Results](../images/answer.png)
 
-- **Expandable Sources Panel**  
-  ![Sources](docs/screens/03_sources.png)  
+**Expandable Sources Panel**  
+![Sources](../images/sources.png)
 
 ---
 

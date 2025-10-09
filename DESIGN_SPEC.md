@@ -110,16 +110,16 @@ Conversational chat UI with streaming answers, context grounded in retrieved row
 ## 6️⃣ Prototype (Screenshots)
 
 ### 🖥️ **Full Prototype on Web**
-![Prototype](../images/prototype.png)
+![Prototype](images/prototype.png)
 
 ### 🔍 **Search Interface**
-![Search](../images/search.png)
+![Search](images/search.png)
 
 ### 🧾 **Generated Service Cards**
-![Results](../images/answer.png)
+![Results](images/answer.png)
 
 ### 📚 **Expandable Sources Panel**
-![Sources](../images/sources.png)
+![Sources](images/sources.png)
 
 ---
 

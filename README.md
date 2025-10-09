@@ -82,15 +82,14 @@ The current dataset (`data/services.csv`) contains **~100 entries** of Philadelp
 
 ## 🧪 Prototype (Screenshots)
 
-**Search Interface**  
+### 🔍 **Search Interface**
 ![Search](../images/search.png)
 
-**Generated Service Cards**  
+### 🧾 **Generated Service Cards**
 ![Results](../images/answer.png)
 
-**Expandable Sources Panel**  
+### 📚 **Expandable Sources Panel**
 ![Sources](../images/sources.png)
-
 ---
 
 ## 🔄 Process

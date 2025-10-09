@@ -185,3 +185,4 @@ if go or query.strip():
                             f"  Hours: {r.get('hours','')}  \n"
                             f"  People served: {r.get('eligibility','')}  \n"
                             f"  Phone: {r.get('phone','')}")
+

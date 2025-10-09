@@ -1,6 +1,6 @@
-1. A Primer on Word Embeddings: AI Techniques for Text Analysis in Social Work (Brian E. Perron et al., 2024)
+** 1. A Primer on Word Embeddings: AI Techniques for Text Analysis in Social Work (Brian E. Perron et al., 2024)
 
-Link: arXiv PDF
+Link: [arXiv PDF](https://arxiv.org/pdf/2411.07156)
 
 Summary: This paper introduces word embeddings and related AI methods for social work research, showing how vector representations capture semantic meaning in unstructured text. It highlights applications like analyzing housing support requests and detecting patterns in social needs.
 

@@ -1,7 +1,9 @@
 streamlit
 pandas
-rank-bm25
+numpy
 sentence-transformers
-faiss-cpu
+rank-bm25
 python-dotenv
-
+requests
+streamlit-authenticator
+pydeck

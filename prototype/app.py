@@ -1,94 +1,131 @@
 import os
 import re
 import time
-import pandas as pd
+import sqlite3
+from datetime import datetime
+
 import numpy as np
+import pandas as pd
+import requests
 import streamlit as st
+import pydeck as pdk
+from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
+
+# -------------------------
+# 0) CONFIG & ENV
+# -------------------------
+load_dotenv()
 
 DATA_PATH = os.getenv("DATA_PATH", "data/services.csv")
 EMB_MODEL = os.getenv("EMB_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 TOPK_BM25 = int(os.getenv("TOPK_BM25", "20"))
 TOPK_FINAL = int(os.getenv("TOPK_FINAL", "5"))
+DB_PATH = os.getenv("DB_PATH", "data/app.db")
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # -------------------------
-# 1) DATA LOADING & CLEANING
+# 1) UI CONFIG + STYLING
 # -------------------------
-def split_latlon(val):
-    try:
-        lon, lat = val.split(",")
-        return float(lat.strip()), float(lon.strip())  # store as (lat, lon)
-    except Exception:
-        return None, None
+st.set_page_config(
+    page_title="Community Resource Navigator",
+    page_icon="🧭",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-def normalize_hours(days_raw, open_t, close_t):
-    """Keep this simple for MVP. We’ll just combine text—don’t overfit parsing yet."""
-    parts = []
-    if isinstance(days_raw, str) and days_raw.strip():
-        parts.append(days_raw.strip())
-    if isinstance(open_t, str) and open_t.strip():
-        parts.append(f"Open: {open_t.strip()}")
-    if isinstance(close_t, str) and close_t.strip():
-        parts.append(f"Close: {close_t.strip()}")
-    return " | ".join(parts) if parts else ""
+def load_css(file_name: str):
+    with open(file_name) as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
+load_css("prototype/styles.css")
+
+# -------------------------
+# 2) USER DATA & AUTH
+# -------------------------
+VALID_USERS = {"user1": "password1", "user2": "password2"}
+USER_DISPLAY = {"user1": "Demo User 1", "user2": "Demo User 2"}
+
+def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            query TEXT,
+            response TEXT,
+            timestamp TEXT
+        )
+    """)
+    conn.commit(); conn.close()
+
+def save_chat(username, query, response):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO chat_history (username, query, response, timestamp) VALUES (?,?,?,?)",
+                (username, query, response, datetime.utcnow().isoformat()))
+    conn.commit(); conn.close()
+
+def load_user_history(username, limit=10):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT query, response, timestamp FROM chat_history WHERE username=? ORDER BY id DESC LIMIT ?",
+                (username, limit))
+    rows = cur.fetchall(); conn.close()
+    return rows
+
+def require_login():
+    if "username" not in st.session_state:
+        st.session_state["username"] = None
+    if st.session_state["username"] is None:
+        st.title("🧭 Community Resource Navigator – Login")
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        if st.button("Login"):
+            if u in VALID_USERS and VALID_USERS[u] == p:
+                st.session_state["username"] = u
+                st.success("✅ Logged in successfully! Redirecting...")
+                st.rerun()
+            else:
+                st.error("Incorrect username or password.")
+        st.stop()
+    return st.session_state["username"]
+
+# -------------------------
+# 3) DATA & RETRIEVAL
+# -------------------------
 def load_services_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    df.columns = [c.strip() for c in df.columns]
-    # Make robust to casing
-    rename = {
-        "Id": "id",
-        "Category": "category",
-        "Organization Name": "name",
-        "Address": "address",
-        "Zip Code": "zip",
-        "Days": "days",
-        "Time: Open": "open",
-        "Time: Close": "close",
-        "People Served": "eligibility",
-        "Description": "description",
-        "Phone Number": "phone",
-        "LatLon": "latlon",
-    }
-    for k,v in rename.items():
-        if k in df.columns:
-            df.rename(columns={k:v}, inplace=True)
+    rename = {"Organization Name":"name","Category":"category","Address":"address",
+              "People Served":"eligibility","Description":"description",
+              "Phone Number":"phone","LatLon":"latlon","Days":"days",
+              "Time: Open":"open","Time: Close":"close"}
+    df.rename(columns={k:v for k,v in rename.items() if k in df.columns}, inplace=True)
+    for c in ["name","category","address","eligibility","description","phone","days","open","close","latlon"]:
+        if c not in df.columns: df[c] = ""
+    def normalize_hours(d, o, c):
+        parts = []
+        for val, label in [(d, ""), (o, "Open: "), (c, "Close: ")]:
+            if isinstance(val, (int, float)) and pd.notna(val):
+                val = str(int(val)) if val.is_integer() else str(val)
+            if isinstance(val, str) and val.strip():
+                parts.append(f"{label}{val.strip()}")
+        return " | ".join(parts) if parts else ""
 
-    # Ensure missing columns exist
-    for col in ["id","category","name","address","zip","days","open","close","eligibility","description","phone","latlon"]:
-        if col not in df.columns:
-            df[col] = ""
-
-    # Lat/Lon split
-    lats, lons = [], []
-    for v in df["latlon"].astype(str).tolist():
-        lat, lon = split_latlon(v)
-        lats.append(lat)
-        lons.append(lon)
-    df["lat"] = lats
-    df["lon"] = lons
-
-    # Hours string
-    df["hours"] = [normalize_hours(d, o, c) for d,o,c in zip(df["days"], df["open"], df["close"])]
-
-    # Retrieval text (concise but rich)
-    df = df.fillna("")
+    df["hours"] = [normalize_hours(d,o,c) for d,o,c in zip(df["days"],df["open"],df["close"])]
     df["retrieval_text"] = (
-        "Name: " + df["name"].astype(str) + " | "
-        "Category: " + df["category"].astype(str) + " | "
-        "Address: " + df["address"].astype(str) + " | "
-        "Zip: " + df["zip"].astype(str) + " | "
-        "Hours: " + df["hours"].astype(str) + " | "
-        "Eligibility: " + df["eligibility"].astype(str) + " | "
-        "Description: " + df["description"].astype(str) + " | "
-        "Phone: " + df["phone"].astype(str)
+        "Name: "+df["name"]+" | Category: "+df["category"]+" | Address: "+df["address"]+
+        " | Hours: "+df["hours"]+" | People Served: "+df["eligibility"]+" | Description: "+df["description"]
     )
-    return df
+    df["lat"],df["lon"] = zip(*df["latlon"].apply(lambda v: (None,None) if not isinstance(v,str) or "," not in v else (float(v.split(",")[1]),float(v.split(",")[0]))))
+    return df.fillna("")
 
-# -------------------------
-# 2) HYBRID RETRIEVAL
-# -------------------------
 @st.cache_resource
 def build_indexes(texts):
     bm25 = BM25Okapi([t.lower().split() for t in texts])
@@ -96,93 +133,142 @@ def build_indexes(texts):
     embs = embedder.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
     return bm25, embedder, embs
 
-def hybrid_search(query, bm25, embedder, embs, texts, k_bm25=20, k_final=5):
-    # BM25
-    scores_b = bm25.get_scores(query.lower().split())
-    idx_b = np.argsort(scores_b)[::-1][:k_bm25]
-    # Embeddings
-    q = embedder.encode([query], convert_to_numpy=True, normalize_embeddings=True)[0]
-    scores_e = embs @ q
-    idx_e = np.argsort(scores_e)[::-1][:k_bm25]
-    # Union + fused score
-    cand = list(set(idx_b).union(set(idx_e)))
-    fused = [(i, 0.5*scores_b[i] + 0.5*scores_e[i]) for i in cand]
-    fused.sort(key=lambda x:x[1], reverse=True)
-    return [i for i,_ in fused[:k_final]]
+def hybrid_search(query,bm25,embedder,embs,texts,df,user_keywords=None,k_bm25=20,k_final=7):
+    sb = bm25.get_scores(query.lower().split())
+    q = embedder.encode([query],convert_to_numpy=True,normalize_embeddings=True)[0]
+    se = embs @ q
+    sb=(sb-sb.min())/(sb.max()-sb.min()+1e-9); se=(se-se.min())/(se.max()-se.min()+1e-9)
+    fused=0.6*sb+0.4*se
+    if user_keywords:
+        boost=df["retrieval_text"].apply(lambda x:any(kw.lower() in x.lower() for kw in user_keywords)).astype(float)
+        fused+=0.2*boost.values
+    top_idx=np.argsort(fused)[::-1][:k_final]
+    return top_idx
 
 # -------------------------
-# 3) GENERATION (OFFLINE BASELINE)
+# 4) GROQ HELPERS
 # -------------------------
-def card_from_row(r):
-    parts = []
-    if r.get("name"): parts.append(f"**{r['name']}**")
-    if r.get("category"): parts.append(f"_{r['category']}_")
-    if r.get("address"): parts.append(r["address"])
-    if r.get("hours"): parts.append(f"Hours: {r['hours']}")
-    if r.get("eligibility"): parts.append(f"Eligibility: {r['eligibility']}")
-    if r.get("phone"): parts.append(f"Phone: {r['phone']}")
-    return " • ".join(parts)
+def groq_generate_answer(query,rows):
+    if not GROQ_API_KEY: return "Missing GROQ_API_KEY."
+    context="\n".join([f"- {r['name']} | {r['address']} | {r['category']}" for r in rows])
+    prompt = f"""
+You are a helpful community resource assistant for Philadelphia.
 
-def offline_answer(query, rows):
-    if not rows:
-        return ("I don't know. I couldn't find a relevant service in the current dataset. "
-                "You might broaden your query or call 211 for updated options.")
-    cards = "\n".join([f"- {card_from_row(r)}" for r in rows[:3]])
-    return f"Here are some options:\n\n{cards}\n\n(Verify hours by calling ahead.)"
+User query: "{query}"
+
+Here are the top relevant services:
+{context}
+
+Return a concise list of **exactly 3** helpful matches in this format:
+1. Name — one-line factual summary
+2. Name — one-line factual summary
+3. Name — one-line factual summary
+"""
+
+    headers={"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"}
+    body={"model":GROQ_MODEL,"messages":[{"role":"system","content":"Helpful factual assistant."},{"role":"user","content":prompt}],
+          "temperature":0.3,"max_tokens":300}
+    try:
+        resp=requests.post(GROQ_URL,headers=headers,json=body)
+        data=resp.json()
+        if "choices" in data: return data["choices"][0]["message"]["content"]
+        return "⚠️ Groq error"
+    except Exception as e:
+        return f"Groq error: {e}"
 
 # -------------------------
-# 4) STREAMLIT UI
+# 5) APP MAIN
 # -------------------------
-st.set_page_config(page_title="Community Resource Navigator", page_icon="🧭", layout="wide")
-st.title("🧭 Community Resource Navigator")
-st.caption("Generative AI + RAG to find local services fast (prototype)")
+init_db()
+df=load_services_csv(DATA_PATH)
+bm25,embedder,embs=build_indexes(df["retrieval_text"].tolist())
 
-df = load_services_csv(DATA_PATH)
-bm25, embedder, embs = build_indexes(df["retrieval_text"].tolist())
+username=require_login()
+display_name=USER_DISPLAY.get(username,username)
 
+if st.sidebar.button("Logout"):
+    st.session_state["username"]=None; st.rerun()
+
+st.sidebar.success(f"Logged in as {display_name}")
+st.markdown("""
+<div style="display:flex;align-items:center;justify-content:space-between;">
+<h2 style="color:#003366;">🧭 Community Resource Navigator</h2>
+<span style="color:#666;">AI-powered local support finder for Philadelphia</span>
+</div>
+""", unsafe_allow_html=True)
+
+# --- Sidebar filters & history
 with st.sidebar:
-    st.markdown("### Dataset")
-    st.write(f"Rows: {len(df)}")
-    st.write("City: Philadelphia (prototype)")
-    st.markdown("**Filters (optional MVP)**")
-    sel_cat = st.multiselect("Category", sorted([c for c in df["category"].unique() if str(c).strip()]), [])
-    sel_group = st.multiselect("People Served", ["Women","Men","Families","Children"], [])
+    st.markdown("### Filters")
+    sel_cat=st.multiselect("Category",sorted([c for c in df["category"].unique() if str(c).strip()]),[])
+    sel_group=st.multiselect("People Served",["Women","Men","Families","Children"],[])
+    st.markdown("---"); st.markdown("### Recent Searches")
+    for i,(q,_,ts) in enumerate(load_user_history(username,limit=5)):
+        if st.button(f"🔁 {q}",key=f"hist_{i}"):
+            st.session_state["user_query"]=q; st.rerun()
 
-query = st.text_input("What do you need?", placeholder="e.g., free dinner near 19107 on Sunday")
-go = st.button("Search")
+# --- Main layout
+col1,col2=st.columns([2,1])
+with col1:
+    st.markdown("### Ask for help")
+    query=st.text_input("What do you need?",value=st.session_state.get("user_query",""),placeholder="e.g., free dinner near 19107 on Sunday")
+    if st.button("Search") and query.strip():
+        q=query.strip(); t0=time.time()
 
-if go or query.strip():
-    q = query.strip()
-    t0 = time.time()
-    # Filter pre-candidates (simple, optional)
-    mask = pd.Series([True]*len(df))
-    if sel_cat:
-        mask &= df["category"].astype(str).str.contains("|".join([re.escape(x) for x in sel_cat]), case=False, na=False)
-    if sel_group:
-        mask &= df["eligibility"].astype(str).str.contains("|".join([re.escape(x) for x in sel_group]), case=False, na=False)
-    sub_idx = df[mask].index.tolist()
-    texts = df.loc[sub_idx, "retrieval_text"].tolist()
+        mask=pd.Series([True]*len(df))
+        if sel_cat: mask&=df["category"].astype(str).str.contains("|".join(sel_cat),case=False,na=False)
+        if sel_group: mask&=df["eligibility"].astype(str).str.contains("|".join(sel_group),case=False,na=False)
+        sub_df=df[mask]
 
-    if not texts:
-        st.warning("No rows match current filters. Clearing filters might help.")
-    else:
-        # Build temporary indexes for filtered subset (fast for < few thousand rows)
-        bm25_f = BM25Okapi([t.lower().split() for t in texts])
-        embs_f = embedder.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
-        # Map filtered indices back to original df indices
-        hits_local = hybrid_search(q, bm25_f, embedder, embs_f, texts, k_bm25=TOPK_BM25, k_final=TOPK_FINAL)
-        hits_global = [sub_idx[i] for i in hits_local]
-        rows = df.iloc[hits_global].to_dict(orient="records")
-        answer = offline_answer(q, rows)
-        st.markdown("### Answer")
-        st.write(answer)
-        st.caption(f"Latency: {time.time()-t0:.2f}s")
+        history_rows=load_user_history(username,limit=5)
+        user_keywords=[w for h in history_rows for w in re.findall(r"\\b\\w+\\b",h[0].lower()) if len(w)>3]
 
-        with st.expander("See retrieved sources"):
-            for r in rows:
-                st.markdown(f"- **{r.get('name','')}**, {r.get('address','')}  \n"
-                            f"  _{r.get('category','')}_  \n"
-                            f"  Hours: {r.get('hours','')}  \n"
-                            f"  People served: {r.get('eligibility','')}  \n"
-                            f"  Phone: {r.get('phone','')}")
+        texts=sub_df["retrieval_text"].tolist()
+        bm25_f=BM25Okapi([t.lower().split() for t in texts])
+        embs_f=embedder.encode(texts,convert_to_numpy=True,normalize_embeddings=True)
+        hits=hybrid_search(q,bm25_f,embedder,embs_f,texts,sub_df,user_keywords=user_keywords,k_bm25=TOPK_BM25,k_final=TOPK_FINAL)
+        rows=sub_df.iloc[hits].to_dict(orient="records")
 
+        with st.spinner("Generating recommendations..."):
+            answer=groq_generate_answer(q,rows)
+        save_chat(username,q,answer)
+
+        st.markdown("### 🔍 Recommended Services")
+        st.caption(f"Generated in {time.time()-t0:.2f}s")
+
+        lines = [l.strip() for l in answer.split("\n") if l.strip()]
+        for i, line in enumerate(lines, start=1):
+            name_desc = re.split(r"\d+\.\s+", line)[-1].strip()
+            name, desc = (name_desc.split("—", 1) + [""])[:2]
+            name = name.strip()
+            desc = desc.strip()
+
+            matched = next((r for r in rows if r["name"].lower() in name.lower()), None)
+
+            st.markdown(f"### 🏠 {i}. {name}")
+            st.write(desc)
+
+            if matched:
+                with st.expander("📋 Details"):
+                    st.write(f"**Address:** {matched.get('address', 'N/A')}")
+                    if matched.get("phone"):
+                        st.write(f"📞 **Phone:** [{matched['phone']}](tel:{matched['phone']})")
+                    if matched.get("hours"):
+                        st.write(f"🕓 **Hours:** {matched['hours']}")
+                    if matched.get("eligibility"):
+                        st.write(f"👥 **Eligibility:** {matched['eligibility']}")
+                    if matched.get("address") and isinstance(matched["address"], str) and matched["address"].strip():
+                        st.markdown(f"[🌐 Open in Google Maps](https://www.google.com/maps/search/?api=1&query={matched['address'].replace(' ', '+')})")
+            st.markdown("---")
+
+
+with col2:
+    st.markdown("### 📍 Map of Services")
+    if "rows" in locals() and rows:
+        map_df=pd.DataFrame([{"lat":r["lat"],"lon":r["lon"],"name":r["name"],"category":r["category"]} for r in rows if r.get("lat") and r.get("lon")])
+        if not map_df.empty:
+            layer=pdk.Layer("ScatterplotLayer",data=map_df,get_position=["lon","lat"],get_radius=120,get_fill_color=[46,103,209,180],pickable=True)
+            deck=pdk.Deck(map_style="mapbox://styles/mapbox/light-v10",layers=[layer],initial_view_state=pdk.ViewState(latitude=39.9526,longitude=-75.1652,zoom=11),tooltip={"text":"{name}\\n{category}"})
+            st.pydeck_chart(deck)
+        else:
+            st.caption("No mappable locations yet.")

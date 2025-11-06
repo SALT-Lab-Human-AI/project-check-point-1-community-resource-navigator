@@ -235,7 +235,7 @@ if st.sidebar.button("Logout"):
 st.sidebar.success(f"Logged in as {display_name}")
 st.markdown("""
 <div style="display:flex;align-items:center;justify-content:space-between;">
-<h2 style="color:#003366;">🧭 Community Resource Navigator</h2>
+<h2 style="color:white; font-weight:800;">🧭 Community Resource Navigator</h2>
 <span style="color:#666;">AI-powered local support finder for Philadelphia</span>
 </div>
 """, unsafe_allow_html=True)
@@ -257,11 +257,18 @@ with col1:
     query=st.text_input("What do you need?",value=st.session_state.get("user_query",""),placeholder="e.g., free dinner near 19107 on Sunday")
     if st.button("Search") and query.strip():
         q=query.strip(); t0=time.time()
+        query_parts = [q]
 
-        mask=pd.Series([True]*len(df))
-        if sel_cat: mask&=df["category"].astype(str).str.contains("|".join(sel_cat),case=False,na=False)
-        if sel_group: mask&=df["eligibility"].astype(str).str.contains("|".join(sel_group),case=False,na=False)
-        sub_df=df[mask].copy()
+        if sel_cat:
+            query_parts.append("Categories: " + ", ".join(sel_cat))
+        if sel_group:
+            query_parts.append("People Served: " + ", ".join(sel_group))
+
+        # Final unified query (this will go into BM25 + embeddings)
+        final_query = " ".join(query_parts)
+
+        sub_df = df.copy()
+
 
         # --- Load additional Philly311 data
         st.info("Fetching live updates from Philly311...")
@@ -274,7 +281,7 @@ with col1:
         texts=combined_df["retrieval_text"].tolist()
         bm25_f=BM25Okapi([t.lower().split() for t in texts])
         embs_f=embedder.encode(texts,convert_to_numpy=True,normalize_embeddings=True)
-        hits=hybrid_search(q,bm25_f,embedder,embs_f,texts,combined_df,user_keywords=user_keywords,k_bm25=TOPK_BM25,k_final=TOPK_FINAL)
+        hits=hybrid_search(final_query,bm25_f,embedder,embs_f,texts,combined_df,user_keywords=user_keywords,k_bm25=TOPK_BM25,k_final=TOPK_FINAL)
         rows=combined_df.iloc[hits].to_dict(orient="records")
 
         with st.spinner("Generating recommendations..."):

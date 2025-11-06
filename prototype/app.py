@@ -28,6 +28,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
+PHILLY311_URL = "https://api.phila.gov/311/v1/requests"
+
 # -------------------------
 # 1) UI CONFIG + STYLING
 # -------------------------
@@ -124,7 +126,49 @@ def load_services_csv(path: str) -> pd.DataFrame:
         " | Hours: "+df["hours"]+" | People Served: "+df["eligibility"]+" | Description: "+df["description"]
     )
     df["lat"],df["lon"] = zip(*df["latlon"].apply(lambda v: (None,None) if not isinstance(v,str) or "," not in v else (float(v.split(",")[1]),float(v.split(",")[0]))))
+    df["source"] = "local"
     return df.fillna("")
+
+def load_philly311_data(query: str, limit: int = 50) -> pd.DataFrame:
+    """Fetch and normalize live Philly311 data."""
+    try:
+        params = {"limit": limit}
+        resp = requests.get(PHILLY311_URL, params=params, timeout=5)
+        if not resp.ok:
+            return pd.DataFrame()
+        data = resp.json().get("service_requests", [])
+        records = []
+        for d in data:
+            desc = (d.get("service_name", "") + " - " + str(d.get("description", ""))).strip()
+            if query.lower() in desc.lower():
+                records.append({
+                    "name": d.get("service_name", "Philly311 Request"),
+                    "category": "311 City Service",
+                    "address": d.get("address", "N/A"),
+                    "eligibility": "",
+                    "description": desc,
+                    "phone": "",
+                    "days": "",
+                    "open": "",
+                    "close": "",
+                    "hours": "",
+                    "latlon": f"{d.get('long', '')},{d.get('lat', '')}",
+                    "lat": d.get("lat", None),
+                    "lon": d.get("long", None),
+                    "source": "philly311"
+                })
+        df = pd.DataFrame(records)
+        if not df.empty:
+            df["retrieval_text"] = (
+                "Name: " + df["name"].astype(str) +
+                " | Category: " + df["category"].astype(str) +
+                " | Address: " + df["address"].astype(str) +
+                " | Description: " + df["description"].astype(str)
+            )
+        return df
+    except Exception as e:
+        print(f"Philly311 fetch error: {e}")
+        return pd.DataFrame()
 
 @st.cache_resource
 def build_indexes(texts):
@@ -150,13 +194,13 @@ def hybrid_search(query,bm25,embedder,embs,texts,df,user_keywords=None,k_bm25=20
 # -------------------------
 def groq_generate_answer(query,rows):
     if not GROQ_API_KEY: return "Missing GROQ_API_KEY."
-    context="\n".join([f"- {r['name']} | {r['address']} | {r['category']}" for r in rows])
+    context="\n".join([f"- {r['name']} | {r['address']} | {r['category']} ({r.get('source','local')})" for r in rows])
     prompt = f"""
 You are a helpful community resource assistant for Philadelphia.
 
 User query: "{query}"
 
-Here are the top relevant services:
+Here are the top relevant services (from local data and Philly311):
 {context}
 
 Return a concise list of **exactly 3** helpful matches in this format:
@@ -164,7 +208,6 @@ Return a concise list of **exactly 3** helpful matches in this format:
 2. Name — one-line factual summary
 3. Name — one-line factual summary
 """
-
     headers={"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"}
     body={"model":GROQ_MODEL,"messages":[{"role":"system","content":"Helpful factual assistant."},{"role":"user","content":prompt}],
           "temperature":0.3,"max_tokens":300}
@@ -218,23 +261,28 @@ with col1:
         mask=pd.Series([True]*len(df))
         if sel_cat: mask&=df["category"].astype(str).str.contains("|".join(sel_cat),case=False,na=False)
         if sel_group: mask&=df["eligibility"].astype(str).str.contains("|".join(sel_group),case=False,na=False)
-        sub_df=df[mask]
+        sub_df=df[mask].copy()
+
+        # --- Load additional Philly311 data
+        st.info("Fetching live updates from Philly311...")
+        philly_df=load_philly311_data(q)
+        combined_df=pd.concat([sub_df,philly_df],ignore_index=True)
 
         history_rows=load_user_history(username,limit=5)
         user_keywords=[w for h in history_rows for w in re.findall(r"\\b\\w+\\b",h[0].lower()) if len(w)>3]
 
-        texts=sub_df["retrieval_text"].tolist()
+        texts=combined_df["retrieval_text"].tolist()
         bm25_f=BM25Okapi([t.lower().split() for t in texts])
         embs_f=embedder.encode(texts,convert_to_numpy=True,normalize_embeddings=True)
-        hits=hybrid_search(q,bm25_f,embedder,embs_f,texts,sub_df,user_keywords=user_keywords,k_bm25=TOPK_BM25,k_final=TOPK_FINAL)
-        rows=sub_df.iloc[hits].to_dict(orient="records")
+        hits=hybrid_search(q,bm25_f,embedder,embs_f,texts,combined_df,user_keywords=user_keywords,k_bm25=TOPK_BM25,k_final=TOPK_FINAL)
+        rows=combined_df.iloc[hits].to_dict(orient="records")
 
         with st.spinner("Generating recommendations..."):
             answer=groq_generate_answer(q,rows)
         save_chat(username,q,answer)
 
         st.markdown("### 🔍 Recommended Services")
-        st.caption(f"Generated in {time.time()-t0:.2f}s")
+        st.caption(f"Generated in {time.time()-t0:.2f}s (includes live Philly311 data)")
 
         lines = [l.strip() for l in answer.split("\n") if l.strip()]
         for i, line in enumerate(lines, start=1):
@@ -250,6 +298,7 @@ with col1:
 
             if matched:
                 with st.expander("📋 Details"):
+                    st.write(f"**Source:** {matched.get('source','local')}")
                     st.write(f"**Address:** {matched.get('address', 'N/A')}")
                     if matched.get("phone"):
                         st.write(f"📞 **Phone:** [{matched['phone']}](tel:{matched['phone']})")
@@ -261,14 +310,27 @@ with col1:
                         st.markdown(f"[🌐 Open in Google Maps](https://www.google.com/maps/search/?api=1&query={matched['address'].replace(' ', '+')})")
             st.markdown("---")
 
-
 with col2:
     st.markdown("### 📍 Map of Services")
     if "rows" in locals() and rows:
-        map_df=pd.DataFrame([{"lat":r["lat"],"lon":r["lon"],"name":r["name"],"category":r["category"]} for r in rows if r.get("lat") and r.get("lon")])
+        map_df=pd.DataFrame([{"lat":r["lat"],"lon":r["lon"],"name":r["name"],"category":r["category"],"source":r.get("source","local")} for r in rows if r.get("lat") and r.get("lon")])
         if not map_df.empty:
-            layer=pdk.Layer("ScatterplotLayer",data=map_df,get_position=["lon","lat"],get_radius=120,get_fill_color=[46,103,209,180],pickable=True)
-            deck=pdk.Deck(map_style="mapbox://styles/mapbox/light-v10",layers=[layer],initial_view_state=pdk.ViewState(latitude=39.9526,longitude=-75.1652,zoom=11),tooltip={"text":"{name}\\n{category}"})
+            layer=pdk.Layer("ScatterplotLayer",data=map_df,get_position=["lon","lat"],get_radius=120,
+                            get_fill_color=["source == 'philly311' ? 255 : 46",
+                                            "source == 'philly311' ? 165 : 103",
+                                            "source == 'philly311' ? 0 : 209",180],
+                            pickable=True)
+            deck = pdk.Deck(
+                map_style=None,  # disables Mapbox, uses default OpenStreetMap
+                layers=[layer],
+                initial_view_state=pdk.ViewState(
+                    latitude=39.9526,
+                    longitude=-75.1652,
+                    zoom=11
+                ),
+            tooltip={"text": "{name}\n{category}\n(Source: {source})"}
+)
+
             st.pydeck_chart(deck)
         else:
             st.caption("No mappable locations yet.")

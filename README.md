@@ -2,6 +2,9 @@
 
 ---
 
+Slides Link : https://docs.google.com/presentation/d/1cPSwgnsAvx9lTGpFdEA9poH7hpWxM5H8fnZDRjKh27I/edit?slide=id.g3a105736640_0_0#slide=id.g3a105736640_0_0
+App Link : https://community-navigator-ss.streamlit.app/
+
 ## 📝 Problem Statement and Why It Matters
 Finding community resources such as food pantries, free clinics, ESL classes, job training, and housing support is often difficult. Many residents—especially new immigrants, seniors, or low-income families—face barriers like outdated websites, overwhelming directories, or language challenges.  
 

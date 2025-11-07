@@ -82,22 +82,100 @@ def load_user_history(username, limit=10):
     rows = cur.fetchall(); conn.close()
     return rows
 
+def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    # existing chat_history table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            query TEXT,
+            response TEXT,
+            timestamp TEXT
+        )
+    """)
+    # new users table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL
+        )
+    """)
+    conn.commit(); conn.close()
+
+import bcrypt
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+
 def require_login():
     if "username" not in st.session_state:
         st.session_state["username"] = None
+
     if st.session_state["username"] is None:
-        st.title("🧭 Community Resource Navigator – Login")
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
-        if st.button("Login"):
-            if u in VALID_USERS and VALID_USERS[u] == p:
-                st.session_state["username"] = u
-                st.success("✅ Logged in successfully! Redirecting...")
-                st.rerun()
-            else:
-                st.error("Incorrect username or password.")
+        st.title("🧭 Community Resource Navigator")
+
+        tabs = st.tabs(["Login", "Create Account"])
+
+        # ----- LOGIN TAB -----
+        with tabs[0]:
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+
+            if st.button("Login", key="login_button"):
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id, name, email, password_hash FROM users WHERE email=?",
+                    (email,)
+                )
+                user = cur.fetchone()
+                conn.close()
+
+                if user and verify_password(password, user[3]):
+                    # store the user's name in session
+                    st.session_state["username"] = user[1]
+                    st.success(f"Welcome back, {user[1]}!")
+                    st.rerun()
+                else:
+                    st.error("Invalid email or password.")
+
+        # ----- CREATE ACCOUNT TAB -----
+        with tabs[1]:
+            name = st.text_input("Full Name", key="signup_name")
+            new_email = st.text_input("Email (for login)", key="signup_email")
+            new_pass = st.text_input("Password", type="password", key="signup_password")
+
+            if st.button("Create Account", key="signup_button"):
+                if name and new_email and new_pass:
+                    conn = sqlite3.connect(DB_PATH)
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+                            (name, new_email, hash_password(new_pass))
+                        )
+                        conn.commit()
+                        st.success("Account created! You can now log in.")
+                    except sqlite3.IntegrityError:
+                        st.error("This email is already registered.")
+                    conn.close()
+                else:
+                    st.warning("Please fill in all fields.")
+
+        # stop rendering the rest of the app until user logs in
         st.stop()
+
     return st.session_state["username"]
+
 
 # -------------------------
 # 3) DATA & RETRIEVAL
@@ -196,18 +274,22 @@ def groq_generate_answer(query,rows):
     if not GROQ_API_KEY: return "Missing GROQ_API_KEY."
     context="\n".join([f"- {r['name']} | {r['address']} | {r['category']} ({r.get('source','local')})" for r in rows])
     prompt = f"""
-You are a helpful community resource assistant for Philadelphia.
+You are a helpful assistant for finding local services in Philadelphia.
 
 User query: "{query}"
 
 Here are the top relevant services (from local data and Philly311):
 {context}
 
-Return a concise list of **exactly 3** helpful matches in this format:
+If you find at least one relevant match, return exactly 3 helpful matches like this:
 1. Name — one-line factual summary
 2. Name — one-line factual summary
 3. Name — one-line factual summary
+
+If none of the provided services match the request, do **not apologize**.
+Instead, recommend **the 3 closest categories or related resources** from the list.
 """
+
     headers={"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"}
     body={"model":GROQ_MODEL,"messages":[{"role":"system","content":"Helpful factual assistant."},{"role":"user","content":prompt}],
           "temperature":0.3,"max_tokens":300}
@@ -271,7 +353,6 @@ with col1:
 
 
         # --- Load additional Philly311 data
-        st.info("Fetching live updates from Philly311...")
         philly_df=load_philly311_data(q)
         combined_df=pd.concat([sub_df,philly_df],ignore_index=True)
 
@@ -311,8 +392,7 @@ with col1:
                         st.write(f"📞 **Phone:** [{matched['phone']}](tel:{matched['phone']})")
                     if matched.get("hours"):
                         st.write(f"🕓 **Hours:** {matched['hours']}")
-                    if matched.get("eligibility"):
-                        st.write(f"👥 **Eligibility:** {matched['eligibility']}")
+                    
                     if matched.get("address") and isinstance(matched["address"], str) and matched["address"].strip():
                         st.markdown(f"[🌐 Open in Google Maps](https://www.google.com/maps/search/?api=1&query={matched['address'].replace(' ', '+')})")
             st.markdown("---")

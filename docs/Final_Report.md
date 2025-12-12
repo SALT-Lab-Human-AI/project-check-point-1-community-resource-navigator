@@ -122,7 +122,7 @@ Tasks:
 # **5. Results**
 
 ## **5.1 Quantitative Results**
-
+Overall, in many tasks my tool was better in terms of various metrics like accuracy and time taken to find exact answer compared to Google search and other existing resources.
 ### **Task Success**
 | System | Task 1 | Task 2 | Average |
 |--------|--------|--------|---------|
